@@ -1,0 +1,32 @@
+# Python cache
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# macOS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Secrets
+.env
+.env.*
+*.pem
+*.key
+*.token
+
+# Large model / binary artifacts
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.npy
+*.npz
+*.pkl
+
+# Experiment logs and outputs
+wandb/
+runs/
+logs/
+outputs/
+results/
