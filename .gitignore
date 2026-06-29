@@ -22,7 +22,6 @@ __pycache__/
 *.onnx
 *.npy
 *.npz
-*.pkl
 
 # Experiment logs and outputs
 wandb/
