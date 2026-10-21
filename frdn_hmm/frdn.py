@@ -1,5 +1,10 @@
+"""Analytic FRDN probabilities, survival targets and theoretical bounds."""
+
 import numpy as np
 from scipy.optimize import minimize_scalar
+
+from .config import BASELINE_WORLD, WorldConfig
+
 
 def frdn_f(x, lambda_val, alpha):
     """
@@ -94,7 +99,8 @@ def compute_theoretical_frdn_gap(lambda_val,alpha,num_grid=100_000,):
         "c_star_FRDN": c_star,
         "kappa_FRDN": kappa_frdn,
     }
-    
+
+
 def compute_true_frdn_analytic(
     lambda_val=0.4,
     alpha=np.pi / np.sqrt(2),
@@ -185,7 +191,6 @@ def compute_true_frdn_analytic(
     }
 
 
-
 def make_age_weights(Phi, age_max, mode="balanced"):
     """
     balanced: uniform over ages 0,...,age_max
@@ -200,3 +205,32 @@ def make_age_weights(Phi, age_max, mode="balanced"):
 
     w = w / w.sum()
     return w
+
+
+def f_alpha(x, *, world=BASELINE_WORLD):
+    """Phase profile, sharing the FRDN formula used during training."""
+    return frdn_f(x, world.lambda_val, world.alpha)
+
+
+def tick_probabilities(ages, *, world=WorldConfig()):
+    """Conditional Tick probabilities at integer ages, including the reset state."""
+    ages = np.asarray(ages)
+    if not np.issubdtype(ages.dtype, np.integer) or np.any(ages < 0):
+        raise ValueError("ages must be nonnegative integers")
+    reset = world.reset_probability
+    if reset is None:
+        reset = compute_true_frdn_analytic(world.lambda_val, world.alpha, age_max=0)["S_cond"][0]
+    return np.where(ages == 0, reset, frdn_f(ages * world.alpha, world.lambda_val, world.alpha))
+
+
+def S_true(t, *, world=BASELINE_WORLD):
+    """Scalar or vector true curve using the historical baseline reset preset."""
+    return tick_probabilities(t, world=world)
+
+
+def true_curve(T, *, world=BASELINE_WORLD):
+    """Return S(t) for every integer age 0,...,T."""
+    return tick_probabilities(np.arange(T + 1), world=world)
+
+
+get_S_true_curve = true_curve

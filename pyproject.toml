@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "frdn-world-model"
+version = "0.1.0"
+description = "Classical hidden world models and analytic FRDN benchmarks"
+requires-python = ">=3.8"
+dependencies = ["numpy", "scipy", "matplotlib", "torch"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["frdn_hmm*"]

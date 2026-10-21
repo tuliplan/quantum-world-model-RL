@@ -1,31 +1,10 @@
-# Python cache
 __pycache__/
 *.py[cod]
-.ipynb_checkpoints/
-
-# macOS / editor
-.DS_Store
-.vscode/
-.idea/
-
-# Secrets
-.env
-.env.*
-*.pem
-*.key
-*.token
-
-# Large model / binary artifacts
-*.pt
-*.pth
-*.ckpt
-*.onnx
-*.npy
-*.npz
-
-# Experiment logs and outputs
-wandb/
-runs/
+*.egg-info/
+.venv/
+build/
+dist/
+.pytest_cache/
+main-figure/
+app-figure/
 logs/
-outputs/
-results/
