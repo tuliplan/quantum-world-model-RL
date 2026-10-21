@@ -1,202 +1,120 @@
+"""Train contiguous-age HMMs and export FRDN benchmark figures."""
+
+import argparse
 import numpy as np
-import matplotlib.pyplot as plt
-import pdb
-import pickle
-import os
 
-from train_util import train_classical_hidden_model_DT,compute_predicted_quantities_from_DT
-from frdn_util import compute_theoretical_frdn_gap, compute_true_frdn_analytic,frdn_f
-
-
-def plot_different_K(save_path):
-    os.makedirs("figure", exist_ok=True)
-    with open(save_path, "rb") as f:
-        data = pickle.load(f)
-
-    result_prob  = data["result_prob"]
-    result_value = data["result_value"]
-    K_list       = data["K_list"]
-    T_vals       = data["T_vals"]
-    value_bound  = data["value_bound"]
-    age_max      = data["age_max"]
-    alpha_val    = data["alpha_val"]
-    lambda_val   = data["lambda_val"]
-    weight_model = data["weight_model"]
-
-    K_list = [5,50,500]
-
-    ages = np.arange(age_max + 1)
-
-    idx1 = np.arange(0, 101, 10)       # 0,10,...,100
-    idx2 = np.arange(150, age_max + 1, 50)   # 150,200,...,age_max
-    plot_idx = np.unique(np.concatenate([idx1, idx2]))
-
-    # ---- Plot 1: conditional tick probability ----
-    plt.figure(figsize=(8, 6))
-    plt.plot(ages[0:200], result_prob[0][0:200],
-             label="True $S(t)$",
-             color="#d0d0d0",
-             linewidth=0.5,
-             marker=".",
-             markerfacecolor="black",
-             markeredgecolor="black",
-             markersize=4,
-             zorder=1)
-    for target_K in K_list:
-        plt.plot(ages[0:200], result_prob[target_K][0:200], label=fr"$S_C(t)$, N={target_K}", linewidth=1.5,zorder=3)
-    plt.xlabel("age $t$", fontsize=14)
-    plt.ylabel("conditional Tick probability", fontsize=14)
-    plt.tick_params(axis="both", labelsize=12)
-    plt.legend(fontsize=12)
-    plt.grid(True)
-    plt.tight_layout()
-    plt.savefig(
-        f"figure/prob_different_K_age{age_max}_alpha_{alpha_val:.2f}_lambda_{lambda_val:.2f}_{weight_model}.pdf",
-        dpi=300, bbox_inches="tight",
-    )
-    plt.close()
-
-    # ---- Plot 2: cumulative action-value gap ----
-    plt.figure(figsize=(8, 6))
-    plt.axhline(
-        value_bound, color="red", linestyle="--",
-        label=f"$(R_T+C_B)\\kappa_{{\\rm FRDN}}={value_bound:.4f}$",
-    )
-    for target_K in K_list:
-        plt.plot(
-            T_vals, result_value[target_K],
-            label=f"N={target_K}",
-            linewidth=1.5,
-        )
-    plt.xscale("log")
-    plt.xlabel("evaluation horizon $T$", fontsize=14)
-    plt.ylabel("uniform-average action-value gap", fontsize=14)
-    plt.tick_params(axis="both", labelsize=12)
-    plt.legend(fontsize=12)
-    plt.grid(True, which="both", alpha=0.6)
-    plt.tight_layout()
-    plt.savefig(
-        f"figure/value_different_K_age{age_max}_alpha_{alpha_val:.2f}_lambda_{lambda_val:.2f}_{weight_model}.pdf",
-        dpi=300, bbox_inches="tight",
-    )
-    plt.close()
-    print(f"Plots saved to figure/")
+from frdn_hmm.config import DATA_DIR, FIGURE_DIR, EvaluationConfig, TrainingConfig, WorldConfig
+from frdn_hmm.evaluation import evaluate_model
+from frdn_hmm.frdn import compute_theoretical_frdn_gap, compute_true_frdn_analytic
+from frdn_hmm.model_io import find_matching_model, load_optimized_model, save_optimized_model
+from frdn_hmm.plotting import plot_different_K, plot_fitted_hmm_decision
 
 
-def different_K(age_max=1000,T_eval=100000):
+def _different_K(age_max=1000, T_eval=100000, K_list=(18,100,479),
+                 data_dir=DATA_DIR, *, force_retrain=False, weight_mode="balanced",
+                 world=None, training=None, evaluation=None, figure_dir=FIGURE_DIR,
+                 evaluate_only=False):
+    """Train on every age 0..age_max, save before evaluating and plot the results.
+
+    Config objects expose experiment settings without adding positional arguments.
+    The return value remains a mapping from model dimension to saved NPZ path.
+    """
+    world = world or WorldConfig()
+    training = training or TrainingConfig(age_max=age_max, weight_mode=weight_mode)
+    evaluation = evaluation or EvaluationConfig(horizon=T_eval, threshold=world.lambda_val)
+    dimensions = tuple(K_list)
+    if not dimensions or any(isinstance(N, bool) or not isinstance(N, int) or N < 1 for N in dimensions):
+        raise ValueError("K_list must contain positive integer dimensions")
+    if evaluate_only and force_retrain:
+        raise ValueError("evaluate_only and force_retrain cannot be combined")
+    # Resolve every existing model first; evaluation-only never starts training.
+    existing_paths = ({N: find_matching_model(N, data_dir=data_dir, world=world,
+                        age_max=training.age_max, weight_mode=training.weight_mode)
+                       for N in dimensions} if evaluate_only else {})
+    target = compute_true_frdn_analytic(world.lambda_val, world.alpha, training.age_max)
+    if world.reset_probability is not None:
+        raise ValueError("Training uses the analytic reset probability; use reset overrides for baseline comparison")
+    saved_paths, results = {}, {}
+    for N in dimensions:
+        try:
+            if force_retrain:
+                raise FileNotFoundError
+            path = existing_paths[N] if evaluate_only else find_matching_model(N, data_dir=data_dir, world=world,
+                                       age_max=training.age_max, weight_mode=training.weight_mode,
+                                       training=training)
+            model = load_optimized_model(N, path)
+            print(f"Model N={N} loaded from {path}")
+        except FileNotFoundError:
+            if evaluate_only:
+                raise
+            from frdn_hmm.training import train_classical_hidden_model_DT
+            model = train_classical_hidden_model_DT(target, N, **training.trainer_kwargs(), verbose=True)
+            path = save_optimized_model(model, lambda_val=world.lambda_val, alpha_val=world.alpha,
+                                        age_max=training.age_max, weight_mode=training.weight_mode,
+                                        data_dir=data_dir, training_config=training)
+            print(f"Model N={N} saved to {path}")
+        saved_paths[N] = path
+        results[N] = evaluate_model(model, plot_age_max=training.age_max, world=world, config=evaluation)
+        tail = results[N]["tail"]
+        print(f"N={N}: S(T={evaluation.horizon})={tail['endpoint']:.12f}; "
+              f"tail spread={tail['spread']:.3e}; stable={tail['stable']}")
+
+    suffix = f"_{training.weight_mode}"
+    if evaluate_only:
+        suffix += "_existing"
+    elif training.optimizer == "adam-metric":
+        suffix += f"_adam-metric_b2-{training.betas[1]:g}"
+    bound = compute_theoretical_frdn_gap(world.lambda_val, world.alpha)["kappa_FRDN"]
+    data = dict(result_prob={0: target["S_cond"], **{N: value["probability"] for N, value in results.items()}},
+                result_value={N: value["value_gap"] for N, value in results.items()},
+                result_decision={N: value["decisions"] for N, value in results.items()},
+                K_list=list(dimensions), T_vals=np.arange(1, evaluation.horizon + 1),
+                value_bound=evaluation.reward_scale * bound,
+                age_max=training.age_max, T_eval=evaluation.horizon, alpha_val=world.alpha,
+                lambda_val=world.lambda_val, weight_model=training.weight_mode,
+                optimizer=training.optimizer, adam_betas=training.betas, artifact_suffix=suffix)
+    paths = plot_different_K(data, output_dir=figure_dir)
+    paths.update(plot_fitted_hmm_decision(data, output_dir=figure_dir))
+    for name, path in paths.items():
+        print(f"{name}: {path}")
+    return saved_paths
 
 
-    lambda_val = 0.4
-    alpha_val = np.pi / np.sqrt(2)
-    weight_model = 'natural'
-
-    gamma = 0.0
-    RT = 1.0
-    CB = 1.0
-    # Required to make Wait dominate Maintain/Probe in both
-    # the true world and the classical model.
-    CM = CB
-    # Probe parameters in the three-action construction.
-    # Under gamma = 0, Probe becomes a constant action.
-    CP = CM
-    RP = -CM
-    reward_scale = RT + CB
-
-    theory_bound = compute_theoretical_frdn_gap(lambda_val, alpha_val)
-    kappa_frdn = theory_bound["kappa_FRDN"]
-    value_bound = reward_scale * kappa_frdn
-
-    true = compute_true_frdn_analytic(
-        lambda_val=lambda_val,
-        alpha=alpha_val,
-        age_max=age_max,
-    )
-
-    Phi_true = true["Phi"]
-    S_true = true["S_cond"]
-    q_true = true["q"]
-
-    T_vals = np.arange(1, T_eval + 1)
-    ages_eval = np.arange(T_eval + 1)
-
-    S_true_eval = frdn_f(
-        ages_eval * alpha_val,
-        lambda_val,
-        alpha_val,
-    )
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dimensions", type=int, nargs="+", default=[479,])
+    parser.add_argument("--train-age", type=int, default=10000)
+    parser.add_argument("--eval-horizon", type=int, default=100000)
+    parser.add_argument("--weight", choices=["balanced", "natural"], default="balanced")
+    parser.add_argument("--steps", type=int, default=3000)
+    parser.add_argument("--restarts", type=int, default=3)
+    parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--optimizer", choices=["adam", "adam-metric"])
+    parser.add_argument("--beta2", type=float)
+    parser.add_argument("--grad-clip-value", type=float, default=1e4,
+                        help="Limit recurrence and parameter gradients before Adam (default: 10000)")
+    parser.add_argument("--lambda-val", type=float, default=0.4)
+    parser.add_argument("--alpha", type=float, default=WorldConfig().alpha)
+    parser.add_argument("--data-dir", default=str(DATA_DIR))
+    parser.add_argument("--figure-dir", default=str(FIGURE_DIR))
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--force-retrain", action="store_true")
+    mode.add_argument("--evaluate-only", action="store_true",
+                      help="Evaluate existing models matched by world, age and weight; never train")
+    args = parser.parse_args(argv)
+    training = TrainingConfig(age_max=args.train_age, weight_mode=args.weight,
+                              steps=args.steps, num_restarts=args.restarts, lr=args.learning_rate,
+                              seed=args.seed, device=args.device, optimizer_name=args.optimizer,
+                              adam_betas=None if args.beta2 is None else (0.9, args.beta2),
+                              grad_clip_value=args.grad_clip_value)
+    return _different_K(K_list=args.dimensions, data_dir=args.data_dir,
+                        force_retrain=args.force_retrain, evaluate_only=args.evaluate_only,
+                        world=WorldConfig(args.lambda_val, args.alpha),
+                        training=training, evaluation=EvaluationConfig(horizon=args.eval_horizon,
+                        threshold=args.lambda_val), figure_dir=args.figure_dir)
 
 
-    result_prob = {}
-    result_value = {}
-    result_prob[0] = S_true
-
-    K_list = [5,10,50,100,500]
-
-    for target_K in K_list:
-
-        best_model = train_classical_hidden_model_DT(
-            true=true,
-            K=target_K,
-            age_max=age_max,
-            weight_mode=weight_model,
-            num_restarts=1,
-            steps=3000,
-            lr=1e-3,
-            seed=0,
-            device="cpu",
-            verbose=True,)
-        
-        pred = compute_predicted_quantities_from_DT(
-        D_T=best_model["D_T"],
-        b0=best_model["b0"],
-        age_max=age_max)
-        S_C = pred["S_pred"][:age_max + 1]   # S_C(t) = b0 D_T^t 1
-        result_prob[target_K] = S_C
-
-        pred_eval = compute_predicted_quantities_from_DT(
-        D_T=best_model["D_T"],
-        b0=best_model["b0"],
-        age_max=T_eval)
-
-        S_C_eval = pred_eval["S_pred"]
-        Q_true_W_eval = reward_scale * S_true_eval - CB
-        Q_classical_W_eval = reward_scale * S_C_eval - CB
-        gap_W_eval = np.abs(Q_true_W_eval - Q_classical_W_eval)
-
-        # M and P have exactly zero model-estimation gap in this
-        # gamma=0 reward construction, hence max_a gap = Wait gap.
-        max_action_gap_eval = gap_W_eval.copy()
-
-        cumulative_avg_action_gap = (np.cumsum(max_action_gap_eval[1:]) / T_vals)
-
-        result_value[target_K] = cumulative_avg_action_gap
-
-    # ---- Save results ----
-    save_data = {
-        "result_prob": result_prob,
-        "result_value": result_value,
-        "K_list": K_list,
-        "T_vals": T_vals,
-        "value_bound": value_bound,
-        "age_max": age_max,
-        "T_eval": T_eval,
-        "alpha_val": alpha_val,
-        "lambda_val": lambda_val,
-        "weight_model": weight_model,
-    }
-    os.makedirs("data", exist_ok=True)
-    save_path = f"data/different_K_age{age_max}_alpha_{alpha_val:.2f}_lambda_{lambda_val:.2f}_{weight_model}.pkl"
-    with open(save_path, "wb") as f:
-        pickle.dump(save_data, f)
-    print(f"Results saved to {save_path}")
-    
-    plot_different_K(save_path=save_path)
-
-
-    return
-
-
-#different_K(age_max=1000,T_eval=100000)
-plot_different_K(save_path="data/different_K_age1000_alpha_2.22_lambda_0.40_natural.pkl")
-
-
+if __name__ == "__main__":
+    main()
